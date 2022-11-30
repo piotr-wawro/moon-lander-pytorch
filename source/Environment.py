@@ -29,9 +29,9 @@ class Envirionment():
 
     def __init__(self, env_name: str, timeout: int = None, render: bool = False) -> None:
         if render:
-            self.env = gym.make(env_name, new_step_api=True, render_mode='rgb_array')
+            self.env = gym.make(env_name, render_mode='rgb_array_list')
         else:
-            self.env = gym.make(env_name, new_step_api=True)
+            self.env = gym.make(env_name, render_mode=None)
 
         self.observation_space = self.env.observation_space.shape[0]
         self.action_space = self.env.action_space.n
@@ -50,7 +50,7 @@ class Envirionment():
         self.should_break = False
         self.score = 0
         self.done = False
-        return self.env.reset()
+        return self.env.reset()[0]
 
     def step(self, action):
         """Same as env.step. Returns observation, reward, done."""

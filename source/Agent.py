@@ -90,7 +90,7 @@ class Agent(Savable):
         """Choose action based on observation."""
 
         if self.rnd.random() > self.epsilon:
-            state = torch.tensor(obesrvation, dtype=torch.float).to(self.model.device)
+            state = torch.tensor(obesrvation, dtype=torch.float32).to(self.model.device)
             actions = self.model.forward(state)
             # weights = torch.softmax(actions, dim=0).tolist()
             # action = self.rnd.choices(self.action_space, weights, k=1)[0]
@@ -205,11 +205,11 @@ class Agent(Savable):
                 batch = self.memory.get_batch(self.batch_size)
                 batch = list(zip(*batch))
 
-                state = torch.tensor(np.array(batch[0]), dtype=torch.float).to(self.model.device)
+                state = torch.tensor(np.array(batch[0], dtype=np.float32), dtype=torch.float32).to(self.model.device)
                 action = batch[1]
-                new_state = torch.tensor(np.array(batch[2]), dtype=torch.float).to(self.model.device)
-                reward = torch.tensor(np.array(batch[3]), dtype=torch.float).to(self.model.device)
-                done = torch.tensor(np.array(batch[4]), dtype=torch.bool).to(self.model.device)
+                new_state = torch.tensor(np.array(batch[2], dtype=np.float32), dtype=torch.float32).to(self.model.device)
+                reward = torch.tensor(np.array(batch[3], dtype=np.float32), dtype=torch.float32).to(self.model.device)
+                done = torch.tensor(np.array(batch[4], dtype=np.bool8), dtype=torch.bool).to(self.model.device)
 
                 next = self.model_copy.forward(new_state)
                 next[done] = 0.0
