@@ -1,239 +1,177 @@
-from pathlib import Path
-import random
-from copy import deepcopy
-
-import torch
-import torch.nn as nn
+from gymnasium.utils.save_video import save_video
+import gymnasium as gym
 import numpy as np
-from tqdm import tqdm
+import torch
 
+from DQN import BaseNetwork
 from Memory import Memory
 from utils.SaveManager import Savable
 
 
 class Agent(Savable):
-    """
-    Attributes:
-        environment : Environment
-        model : nn.Module
-        memory : Memory
-        loss : Any
-        optimize : Any
-        epsilon_fun : lambda x
-        epsilon : float
-        gamma : float = 0.99
-        batches : int = None
-        batch_size : int = 64
-    """
+  def __init__(self, environment: gym.Env, memory: Memory, policy_net: BaseNetwork, target_net: BaseNetwork,
+               criterion, optimizer, epsilon_fun, gamma_fun, tau_fun, batch_fun) -> None:
+    self.environment = environment
+    self.memory = memory
+    self.policy_net = policy_net
+    self.target_net = target_net
+    self.criterion = criterion
+    self.optimizer = optimizer
+    self.epsilon_fun = epsilon_fun
+    self.gamma_fun = gamma_fun
+    self.tau_fun = tau_fun
+    self.batch_fun = batch_fun
+    self.rnd = np.random.default_rng()
 
-    def __init__(self, environment, model: nn.Module, memory: Memory, loss, optimizer, epsilon_fun,
-                 gamma: float = 0.99, batches: int = None) -> None:
-        self.environment = environment
-        self.model = model
-        self.memory = memory
+    self.episodes = 0
+    self.steps = 0
+    self.episode_length = []
+    self.cumulative_reward = []
+    self.average_loss = []
 
-        self.model_copy = deepcopy(model)
+    self.target_net.load_state_dict(policy_net.state_dict())
+    self.update_parameters()
 
-        self.epoch = 0
-        self.frames = 0
-        self.avg_score = [[],[]]
-        self.avg_loss = [[],[]]
+  def update_parameters(self):
+    self.epsilon = self.epsilon_fun(self.steps)
+    self.gamma = self.gamma_fun(self.steps)
+    self.tau = self.tau_fun(self.steps)
+    self.batch = self.batch_fun(self.steps)
+    self.memory.batch_size = round(self.batch)
 
-        self.loss = loss
-        self.optimizer = optimizer
+  def save(self):
+    return {
+      'memory': self.memory.save(),
+      'policy_net': self.policy_net.state_dict(),
+      'target_net': self.target_net.state_dict(),
+      'optimizer': self.optimizer.state_dict(),
+      'episodes': self.episodes,
+      'steps': self.steps,
+      'episode_length': self.episode_length,
+      'cumulative_reward': self.cumulative_reward,
+      'average_loss': self.average_loss,
+    }
 
-        self.rnd = random.Random(1)
-        self.epsilon_fun = epsilon_fun
-        self.epsilon = self.epsilon_fun(self.frames)
-        self.gamma = gamma
+  def restore(self, state):
+    self.memory.restore(state['memory'])
+    self.policy_net.load_state_dict(state['policy_net'])
+    self.target_net.load_state_dict(state['target_net'])
+    self.optimizer.load_state_dict(state['optimizer'])
+    self.episodes = state['episodes']
+    self.steps = state['steps']
+    self.episode_length = state['episode_length']
+    self.cumulative_reward = state['cumulative_reward']
+    self.average_loss = state['average_loss']
+    self.update_parameters()
 
-        self.batch_size = round(self.memory.max_size*0.001)
-        self.batches = len(self.memory)//self.batch_size
+  def store_transition(self, state, action, new_state, reward, done):
+    self.memory.append(state, action, new_state, reward, done)
 
-        self.action_space = [i for i in range(model.n_actions)]
+  def record_episode(self, env: gym.Env, path: str):
+    state, info = env.reset()
+    terminated = False
+    truncated = False
 
-    def save(self):
-        """
-        Implementation of save method inherited from Savable class. Returns
-        state of instance.
-        """
+    while not terminated and not truncated:
+      action = self.choose_action(state, eval=True)
+      new_state, reward, terminated, truncated, info = env.step(action)
+      state = new_state
 
-        return {
-            'model': self.model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-            'memory': self.memory.save(),
-            'epoch': self.epoch,
-            'frames': self.frames,
-            'avg_score': self.avg_score,
-            'avg_loss': self.avg_loss,
-            'epsilon': self.epsilon,
-        }
+    save_video(
+      env.render(),
+      video_folder=path,
+      episode_trigger=lambda x: True,
+      fps=env.metadata["render_fps"],
+      episode_index=self.episodes,
+      step_starting_index=self.steps,
+    )
 
-    def restore(self, state):
-        """Implementation of restore method inherited from Savable class."""
+  def episode(self):
+    state, info = self.environment.reset()
+    terminated = False
+    truncated = False
+    self.ep_length = 0
+    self.cum_reward = 0
+    self.avg_loss = []
 
-        self.model.load_state_dict(state['model'])
-        self.model_copy = deepcopy(self.model)
-        self.optimizer.load_state_dict(state['optimizer'])
-        self.memory.restore(state['memory'])
-        self.epoch = state['epoch']
-        self.frames = state['frames']
-        self.avg_score = state['avg_score']
-        self.avg_loss = state['avg_loss']
-        self.epsilon = state['epsilon']
+    while not terminated and not truncated:
+      action = self.choose_action(state)
+      new_state, reward, terminated, truncated, info = self.environment.step(action)
 
-    def store_transition(self, state, action, new_state, reward, done):
-        """Store state in memory."""
-        self.memory.append(state, action, new_state, reward, done)
+      self.store_transition(state, action, new_state, reward, terminated or truncated)
+      state = new_state
 
-    def choose_action(self, obesrvation: list) -> int:
-        """Choose action based on observation."""
+      self.optimize()
+      self.soft_update()
+  
+      self.ep_length += 1
+      self.cum_reward += reward
 
-        if self.rnd.random() > self.epsilon:
-            state = torch.tensor(obesrvation, dtype=torch.float32).to(self.model.device)
-            actions = self.model.forward(state)
-            # weights = torch.softmax(actions, dim=0).tolist()
-            # action = self.rnd.choices(self.action_space, weights, k=1)[0]
-            action = torch.argmax(actions).item()
-        else:
-            action =  self.rnd.choice(self.action_space)
+    self.episodes += 1
+    self.episode_length.append(self.ep_length)
+    self.cumulative_reward.append(self.cum_reward)
+    self.average_loss.append(sum(self.avg_loss)/len(self.avg_loss) if len(self.avg_loss) > 0 else 0)
+    return self.episode_length[-1], self.cumulative_reward[-1], self.average_loss[-1]
 
-        return action
+  def optimize(self):
+    if len(self.memory) < self.memory.batch_size:
+      return
 
-    def gather_experience(self, fill: float = 0.1, frameskip: int = 2):
-        """
-        Play in environment to fill up memory.
+    self.policy_net.train()
 
-        Arguments:
-            fill : float = 0.1 [0,1]
-                Percentage value how much memory to fill.
-            frames : int = 2
-                How many frames will perform the same action.
-        """
+    batch = self.memory.sample()
+    self.back_propagation(batch)
 
-        frames_to_store = self.memory.max_size*fill
-        self.memory.free_memory(fill)
-        stored_frames = 0
-        score_arr = []
+    self.policy_net.eval()
 
-        with tqdm(total=frames_to_store, unit='frames', desc="stored frames", unit_scale=True) as pbar:
-            while stored_frames < frames_to_store:
-                observation = self.environment.reset()
+  def back_propagation(self, batch: int):
+    state, action, new_state, reward, done = [np.vstack(l) for l in zip(*batch)]
+    state = torch.tensor(state, dtype=torch.float32, device=self.policy_net.device)
+    action = torch.tensor(action, dtype=torch.int64, device=self.policy_net.device)
+    new_state = torch.tensor(new_state, dtype=torch.float32, device=self.policy_net.device)
+    reward = torch.tensor(reward, dtype=torch.float32, device=self.policy_net.device)
+    done = torch.tensor(done, dtype=torch.bool, device=self.policy_net.device).flatten()
 
-                while not self.environment.done and not self.environment.should_break:
-                    action = self.choose_action(observation)
+    state_action_values = \
+      self.policy_net.forward(state)\
+      .gather(1, action)
 
-                    reward_sum = 0
-                    for i in range(frameskip):
-                        new_observation, reward, done = self.environment.step(action)
-                        reward_sum += reward
+    new_state_values = torch.zeros((
+      self.memory.batch_size,
+      self.policy_net.n_actions
+    ), device=self.policy_net.device)
+    with torch.no_grad():
+      new_state_values[~done] = self.target_net.forward(new_state[~done])
+    new_state_values = new_state_values.max(1, keepdim=True)[0]
 
-                    self.store_transition(observation, action, new_observation, reward_sum, done)
-                    stored_frames += 1
+    expected_state_action_values = reward + self.gamma * new_state_values
+    loss = self.criterion(state_action_values, expected_state_action_values)
+    self.avg_loss.append(loss.item())
 
-                    observation = new_observation
+    self.optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
+    self.optimizer.step()
 
-                pbar.set_postfix({
-                    "simulation_time": f"{self.environment.time_elapsed():_>6.2f}s",
-                    "score": f"{self.environment.score:_>+8.2f}",
-                    "memory_used": f"{len(self.memory.memory)/self.memory.max_size*100:_>6.2f}%",
-                }, refresh=False)
-                pbar.n = stored_frames
-                pbar.display()
+  def soft_update(self):
+    target_net_state_dict = self.target_net.state_dict()
+    policy_net_state_dict = self.policy_net.state_dict()
+    for key in policy_net_state_dict:
+      target_net_state_dict[key] = policy_net_state_dict[key]*self.tau + target_net_state_dict[key]*(1-self.tau)
+    self.target_net.load_state_dict(target_net_state_dict)
 
-                score_arr.append(self.environment.score)
+  def choose_action(self, state: list, eval: bool = False) -> int:
+    state = torch.tensor(state, dtype=torch.float32, device=self.policy_net.device)
 
-            self.avg_score[0].append(self.epoch)
-            self.avg_score[1].append(sum(score_arr)/len(score_arr))
-            pbar.set_postfix({
-                "epoch": f"{self.epoch}",
-                "avg_score": f"{self.avg_score[1][-1]:_>+8.2f}",
-            })
+    if self.rnd.random() > self.epsilon or eval:
+      with torch.no_grad():
+        actions = self.policy_net.forward(state)
+      chosen_action = actions.argmax().item()
+    else:
+      chosen_action = self.rnd.integers(self.policy_net.n_actions)
 
-    def create_gif(self, env, path: Path):
-        observation = env.reset()
+    if not eval:
+      self.steps += 1
+      self.update_parameters()
 
-        with tqdm(unit='frames') as pbar:
-            while not env.done and not env.should_break:
-                action = self.choose_action(observation)
-
-                for i in range(2):
-                    new_observation, *_ = env.step(action)
-
-                observation = new_observation
-
-                pbar.set_postfix({
-                    "score": f"{env.score:_>+8.2f}",
-                }, refresh=False)
-                pbar.update()
-
-        env.create_gif(path)
-
-    def learn(self, epochs: int = None, loss: float = None) -> float:
-        self.batches = len(self.memory)//self.batch_size
-
-        if len(self.memory)//self.batch_size < 1:
-            return
-
-        if epochs:
-            for i in tqdm(range(epochs), desc="epoch", unit="epochs"):
-                self._next_epoch()
-        elif loss:
-            with tqdm(desc="epoch", unit="epochs") as pbar:
-                model_update = 0
-
-                while True:
-                    self._next_epoch()
-                    pbar.display()
-
-                    if len(self.avg_loss[1]) > 2 and np.average(np.abs(np.diff(self.avg_loss[1][-3:]))) < loss:
-                        self.model_copy = deepcopy(self.model)
-                        model_update += 1
-                    else:
-                        model_update = 0
-
-                    if model_update > 2:
-                        break
-
-    def _next_epoch(self):
-        epoch_loss = []
-        self.model.train()
-
-        with tqdm(total=self.batches, desc="learning", unit="batches") as pbar:
-            for i in range(self.batches):
-                self.frames += self.batch_size
-                batch = self.memory.get_batch(self.batch_size)
-                batch = list(zip(*batch))
-
-                state = torch.tensor(np.array(batch[0], dtype=np.float32), dtype=torch.float32).to(self.model.device)
-                action = batch[1]
-                new_state = torch.tensor(np.array(batch[2], dtype=np.float32), dtype=torch.float32).to(self.model.device)
-                reward = torch.tensor(np.array(batch[3], dtype=np.float32), dtype=torch.float32).to(self.model.device)
-                done = torch.tensor(np.array(batch[4], dtype=np.bool8), dtype=torch.bool).to(self.model.device)
-
-                next = self.model_copy.forward(new_state)
-                next[done] = 0.0
-                target = reward + self.gamma * torch.max(next, dim=1)[0]
-
-                q_eval = self.model.forward(state)[np.arange(self.batch_size), action]
-                loss = self.loss(target, q_eval)
-                epoch_loss.append(loss.item())
-
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-
-                pbar.update()
-
-            self.epsilon = self.epsilon_fun(self.frames)
-            self.epoch += 1
-
-            self.avg_loss[0].append(self.epoch)
-            self.avg_loss[1].append(sum(epoch_loss)/len(epoch_loss))
-
-            pbar.set_postfix({
-                "epoch": f"{self.epoch}",
-                "avg_loss": f"{self.avg_loss[1][-1]:_>8.2f}",
-            })
-
-        self.model.eval()
+    return chosen_action

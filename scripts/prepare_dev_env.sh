@@ -6,5 +6,5 @@ if [[ "$OS" == "unknown" ]]
     exit 1
 fi
 
-source ./scripts/create_venv.sh $OS
-source ./scripts/install_requirements.sh $OS
+source ./scripts/create_venv.sh
+source ./scripts/install_requirements.sh

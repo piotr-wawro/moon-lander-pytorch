@@ -1,28 +1,35 @@
-import torch
+from torch import device, cuda, Tensor
 import torch.nn as nn
-import torch.nn.functional as F
 
-from torch import Tensor
+from torchinfo import summary
 
 
-class DeepQNetwork(nn.Module):
-    def __init__(self, input_dims, fc1_dims, fc2_dims, n_actions) -> None:
-        super(DeepQNetwork, self).__init__()
-        self.input_dims = input_dims
-        self.fc1_dims = fc1_dims
-        self.fc2_dims = fc2_dims
-        self.n_actions = n_actions
+class BaseNetwork(nn.Module):
+  def __init__(self, n_observations: int, n_actions: int) -> None:
+    super(BaseNetwork, self).__init__()
+    self.n_observations = n_observations
+    self.n_actions = n_actions
+    self.device = device('cuda:0' if cuda.is_available() else 'cpu')
 
-        self.fc1 = nn.Linear(self.input_dims, self.fc1_dims)
-        self.fc2 = nn.Linear(self.fc1_dims, self.fc2_dims)
-        self.fc3 = nn.Linear(self.fc2_dims, self.n_actions)
+  def forward(self, state: list) -> Tensor:
+    pass
 
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.to(self.device)
+class DeepQNetworkV1(BaseNetwork):
+  def __init__(self, n_observations: int, n_actions: int) -> None:
+    super(DeepQNetworkV1, self).__init__(n_observations, n_actions)
+    self.net = nn.Sequential(
+      nn.Linear(n_observations, 256),
+      nn.ReLU(),
+      nn.Linear(256, 256),
+      nn.ReLU(),
+      nn.Linear(256, n_actions),
+    )
+    self.to(self.device)
 
-    def forward(self, state: list) -> Tensor:
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        actions = self.fc3(x)
+  def forward(self, state: list) -> Tensor:
+    return self.net(state)
 
-        return actions
+if __name__ == '__main__':
+  model = DeepQNetworkV1(16, 5)
+  batch_size = 64
+  summary(model, input_size=(batch_size, 16))

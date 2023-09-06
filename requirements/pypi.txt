@@ -1,7 +1,8 @@
+gymnasium
+gymnasium[box2d]
 ipykernel
-numpy
 matplotlib
-gym
-gym[box2d]
-Pillow
+moviepy
+numpy
+torchinfo
 tqdm

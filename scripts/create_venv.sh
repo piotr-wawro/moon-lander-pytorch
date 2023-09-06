@@ -1,8 +1,10 @@
-if [[ "$1" == "linux" ]]
+OS=$(source ./scripts/check_os.sh)
+
+if [[ "$OS" == "linux" ]]
     then
     python -m venv venv-linux
     source ./venv-linux/bin/activate
-elif [[ "$1" == "windows" ]]
+elif [[ "$OS" == "windows" ]]
     then
     python -m venv venv-windows
     source ./venv-windows/Scripts/activate
